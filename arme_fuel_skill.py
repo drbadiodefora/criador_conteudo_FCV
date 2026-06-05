@@ -1,4 +1,4 @@
-# arme_fuel_skill.py (versão robusta com fallback de ID)
+# arme_fuel_skill.py (com variações baseadas em dados históricos do mês anterior)
 import os
 import re
 import requests
@@ -7,24 +7,46 @@ from datetime import datetime
 from wordpress_xmlrpc import Client, WordPressPost
 from wordpress_xmlrpc.methods.posts import NewPost
 
+# ============================================================
+# Credenciais – lidas do ambiente
+# ============================================================
 WP_USER = os.environ.get("WP_USERNAME", "")
 WP_PASS = os.environ.get("WP_PASSWORD", "")
 if not WP_USER or not WP_PASS:
     print("❌ Credenciais em falta.")
     exit(1)
 
-# Base histórica (apenas para comparação de variações)
+# ============================================================
+# Base de dados históricos (preços já conhecidos)
+# ============================================================
 PRECOS_HISTORICOS = {
     2026: {
-        5: { "Gasolina": "151.10", "Gasóleo Normal": "126.90", "Gasóleo Eletricidade": "96.90",
-             "Gasóleo Marinha": "90.60", "Petróleo": "160.60", "Fuel 380": "69.30",
-             "Fuel 180": "72.40", "Butano Granel": "144.30" },
-        4: { "Gasolina": "139.89", "Gasóleo Normal": "117.52", "Gasóleo Eletricidade": "95.04",
-             "Gasóleo Marinha": "86.32", "Petróleo": "148.66", "Fuel 380": "67.92",
-             "Fuel 180": "70.99", "Butano Granel": "144.30" }
+        5: {  # Maio 2026
+            "Gasolina": "151.10",
+            "Gasóleo Normal": "126.90",
+            "Gasóleo Eletricidade": "96.90",
+            "Gasóleo Marinha": "90.60",
+            "Petróleo": "160.60",
+            "Fuel 380": "69.30",
+            "Fuel 180": "72.40",
+            "Butano Granel": "144.30"
+        },
+        4: {  # Abril 2026
+            "Gasolina": "139.89",
+            "Gasóleo Normal": "117.52",
+            "Gasóleo Eletricidade": "95.04",
+            "Gasóleo Marinha": "86.32",
+            "Petróleo": "148.66",
+            "Fuel 380": "67.92",
+            "Fuel 180": "70.99",
+            "Butano Granel": "144.30"
+        }
     }
 }
 
+# ============================================================
+# Extração dos preços a partir do HTML do artigo
+# ============================================================
 def extrair_precos_do_html(url):
     print(f"📄 A extrair preços de {url}")
     try:
@@ -55,13 +77,16 @@ def extrair_precos_do_html(url):
         print(f"⚠️ Erro ao extrair HTML: {e}")
     return None
 
+# ============================================================
+# Obter artigo do mês actual (web)
+# ============================================================
 def obter_precos_web(ano, mes):
     meses = ["janeiro","fevereiro","março","abril","maio","junho","julho","agosto","setembro","outubro","novembro","dezembro"]
     mes_nome = meses[mes-1]
     titulo_alvo = f"ARME atualiza preços máximos dos combustíveis para {mes_nome} {ano}"
     print(f"🔎 A procurar artigo: '{titulo_alvo}'")
 
-    # Estratégia 1: Feed RSS (pode falhar)
+    # Estratégia 1: Feed RSS
     feed_url = "https://www.arme.cv/feed"
     try:
         feed = feedparser.parse(feed_url, agent="Mozilla/5.0")
@@ -79,25 +104,21 @@ def obter_precos_web(ano, mes):
         resp = requests.get(search_url, timeout=20)
         resp.raise_for_status()
         padrao = r'<a href="(index\.php\?option=com_content&amp;view=article&amp;id=\d+:[^"]+)".*?>(.*?)</a>'
-        # Guardar todos os artigos encontrados
         candidatos = []
         for link, tit in re.findall(padrao, resp.text, re.IGNORECASE):
             if "preços" in tit.lower() and mes_nome in tit.lower():
                 url_artigo = "https://www.arme.cv/" + link.replace('&amp;', '&')
                 candidatos.append((tit, url_artigo))
         if candidatos:
-            # Pega o primeiro (mais recente)
             tit, url = candidatos[0]
             print(f"✅ Artigo encontrado via pesquisa: {url}")
             return extrair_precos_do_html(url)
     except Exception as e:
         print(f"⚠️ Erro na pesquisa: {e}")
 
-    # Estratégia 3: Construir URL pelo ID (baseado no padrão observado)
-    # Para junho 2026, ID = 1360 (fornecido pelo usuário)
+    # Estratégia 3: URL construída com ID (para meses recentes)
     if ano == 2026:
         if mes == 6:
-            # ID conhecido para junho 2026
             url_construida = f"https://www.arme.cv/index.php?option=com_content&view=article&id=1360:arme-atualiza-precos-maximos-dos-combustiveis-para-junho-2026&catid=79&Itemid=878"
             print(f"🔎 Tentando URL construída (ID=1360): {url_construida}")
             try:
@@ -108,8 +129,7 @@ def obter_precos_web(ano, mes):
             except:
                 pass
         else:
-            # Para meses futuros, tentar IDs a partir do último conhecido + 1
-            # Base: maio (1355) -> junho (1360) diferença 5
+            # Tenta IDs sequenciais a partir do último conhecido
             id_base = 1360
             for tentativa in range(id_base, id_base + 10):
                 url_tentativa = f"https://www.arme.cv/index.php?option=com_content&view=article&id={tentativa}:arme-atualiza-precos-maximos-dos-combustiveis-para-{mes_nome}-{ano}&catid=79&Itemid=878"
@@ -125,16 +145,39 @@ def obter_precos_web(ano, mes):
     print(f"❌ Não foi possível encontrar artigo para {mes_nome} {ano}")
     return None
 
-def obter_precos(ano, mes):
-    precos = obter_precos_web(ano, mes)
-    if precos:
-        print(f"✅ Preços de {mes}/{ano} obtidos da web.")
-        return precos
+# ============================================================
+# Obter preços (com controlo de uso de web vs histórico)
+# ============================================================
+def obter_precos(ano, mes, usar_web=True):
+    # Se for o mês anterior ao actual, usamos sempre os dados históricos (para garantir variação)
+    hoje = datetime.now()
+    mes_atual = hoje.month
+    ano_atual = hoje.year
+    if (ano == ano_atual and mes == mes_atual - 1) or (ano == ano_atual - 1 and mes == 12 and mes_atual == 1):
+        # É o mês anterior – pegar do histórico se disponível
+        if ano in PRECOS_HISTORICOS and mes in PRECOS_HISTORICOS[ano]:
+            print(f"📦 Usando dados históricos para {mes}/{ano} (mês anterior).")
+            return PRECOS_HISTORICOS[ano][mes].copy()
+        else:
+            print(f"⚠️ Dados históricos não disponíveis para {mes}/{ano}. Variações ficarão vazias.")
+            return None
+
+    # Para o mês actual, tenta web primeiro
+    if usar_web:
+        precos = obter_precos_web(ano, mes)
+        if precos:
+            print(f"✅ Preços de {mes}/{ano} obtidos da web.")
+            return precos
+
+    # Fallback para histórico (qualquer mês)
     if ano in PRECOS_HISTORICOS and mes in PRECOS_HISTORICOS[ano]:
-        print(f"📦 Usando dados históricos para {mes}/{ano} (apenas para comparação).")
+        print(f"📦 Usando dados históricos para {mes}/{ano} (fallback).")
         return PRECOS_HISTORICOS[ano][mes].copy()
     return None
 
+# ============================================================
+# Cálculo das variações
+# ============================================================
 def calcular_variacoes(atual, anterior):
     variacoes = {}
     for prod in atual:
@@ -154,6 +197,9 @@ def calcular_variacoes(atual, anterior):
             variacoes[prod] = {'perc': '—', 'diff': '—'}
     return variacoes
 
+# ============================================================
+# Geração do HTML do post (template completo)
+# ============================================================
 def gerar_html(atual, variacoes, mes, ano):
     meses = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
              "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
@@ -180,7 +226,7 @@ def gerar_html(atual, variacoes, mes, ano):
             tabela += '<td>—</td>\n'
             tabela += '<td>—</td>\n'
             tabela += '</tr>\n'
-    tabela += '</tbody></table>\n'
+    tabela += '</tbody>\n</table>\n'
     butano_granel = atual.get('Butano Granel', '0').replace('.', ',')
     garrafas = f"""
 <ul>
@@ -224,17 +270,21 @@ def publicar_rascunho(titulo, conteudo):
     }
     return client.call(NewPost(post))
 
+# ============================================================
+# Execução principal
+# ============================================================
 def main():
     hoje = datetime.now()
     ano, mes = hoje.year, hoje.month
     print(f"🔍 A obter preços de {mes}/{ano}...")
-    atuais = obter_precos(ano, mes)
+    atuais = obter_precos(ano, mes, usar_web=True)
     if not atuais:
         print("❌ Preços do mês actual não disponíveis – a execução será abortada.")
         return
     mes_ant = mes-1 if mes>1 else 12
     ano_ant = ano if mes>1 else ano-1
-    anteriores = obter_precos(ano_ant, mes_ant)
+    # Forçamos o uso de dados históricos para o mês anterior (para garantir que as variações são calculadas)
+    anteriores = obter_precos(ano_ant, mes_ant, usar_web=False)
     variacoes = calcular_variacoes(atuais, anteriores) if anteriores else {}
     meses_nomes = ["janeiro","fevereiro","março","abril","maio","junho",
                    "julho","agosto","setembro","outubro","novembro","dezembro"]
