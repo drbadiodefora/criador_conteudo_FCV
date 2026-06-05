@@ -1,27 +1,86 @@
-# arme_fuel_skill.py (versão com RSS, robusta)
-import os, re, requests, feedparser, unicodedata
+# arme_fuel_skill.py
+import os
+import re
+import requests
+import feedparser
+import unicodedata
 from datetime import datetime
 from wordpress_xmlrpc import Client, WordPressPost
 from wordpress_xmlrpc.methods.posts import NewPost
 
+# ============================================================
+# Credenciais – lidas do ambiente
+# ============================================================
 WP_USER = os.environ.get("WP_USERNAME", "")
 WP_PASS = os.environ.get("WP_PASSWORD", "")
 if not WP_USER or not WP_PASS:
     print("❌ Credenciais em falta.")
     exit(1)
 
-# Base histórica para comparação (apenas para cálculo de variações)
+# ============================================================
+# Base histórica (apenas para comparação de variações)
+# ============================================================
 PRECOS_HISTORICOS = {
     2026: {
-        5: { "Gasolina": "151.10", "Gasóleo Normal": "126.90", "Gasóleo Eletricidade": "96.90",
-             "Gasóleo Marinha": "90.60", "Petróleo": "160.60", "Fuel 380": "69.30",
-             "Fuel 180": "72.40", "Butano Granel": "144.30" },
-        4: { "Gasolina": "139.89", "Gasóleo Normal": "117.52", "Gasóleo Eletricidade": "95.04",
-             "Gasóleo Marinha": "86.32", "Petróleo": "148.66", "Fuel 380": "67.92",
-             "Fuel 180": "70.99", "Butano Granel": "144.30" }
+        5: {
+            "Gasolina": "151.10",
+            "Gasóleo Normal": "126.90",
+            "Gasóleo Eletricidade": "96.90",
+            "Gasóleo Marinha": "90.60",
+            "Petróleo": "160.60",
+            "Fuel 380": "69.30",
+            "Fuel 180": "72.40",
+            "Butano Granel": "144.30"
+        },
+        4: {
+            "Gasolina": "139.89",
+            "Gasóleo Normal": "117.52",
+            "Gasóleo Eletricidade": "95.04",
+            "Gasóleo Marinha": "86.32",
+            "Petróleo": "148.66",
+            "Fuel 380": "67.92",
+            "Fuel 180": "70.99",
+            "Butano Granel": "144.30"
+        }
     }
 }
 
+# ============================================================
+# Extração dos preços a partir do HTML do artigo
+# ============================================================
+def extrair_precos_do_html(url):
+    print(f"📄 A extrair preços de {url}")
+    try:
+        resp = requests.get(url, timeout=20)
+        resp.raise_for_status()
+        texto = re.sub(r'\s+', ' ', resp.text)
+        precos = {}
+        padroes = {
+            "Gasolina": r"Gasolina passa a ser vendida a ([\d.,]+) ESC/L",
+            "Gasóleo Normal": r"Gasóleo Normal, a ([\d.,]+) ESC/L",
+            "Gasóleo Eletricidade": r"Gasóleo para Eletricidade, a ([\d.,]+) ESC/L",
+            "Gasóleo Marinha": r"Gasóleo Marinha, a ([\d.,]+) ESC/L",
+            "Petróleo": r"Petróleo, ([\d.,]+) ESC/L",
+            "Fuel 380": r"Fuel\s+380[^0-9]*([\d.,]+)\s*ESC/Kg",
+            "Fuel 180": r"Fuel\s+180[^0-9]*([\d.,]+)\s*ESC/Kg",
+            "Butano Granel": r"Gás Butano (?:passa a custar|mantem-se) a granel ([\d.,]+) ESC/Kg"
+        }
+        for prod, regex in padroes.items():
+            m = re.search(regex, texto, re.IGNORECASE)
+            if m:
+                precos[prod] = m.group(1).replace(',', '.')
+                print(f"   ✓ {prod}: {precos[prod]}")
+            else:
+                print(f"   ✗ {prod}: não encontrado")
+        if precos and len(precos) >= 5:
+            return precos
+    except Exception as e:
+        print(f"⚠️ Erro ao extrair HTML: {e}")
+    return None
+
+# ============================================================
+# Obter URL do artigo via feed RSS (mais fiável)
+# ============================================================
 def obter_precos_web(ano, mes):
     meses = ["janeiro","fevereiro","março","abril","maio","junho","julho","agosto","setembro","outubro","novembro","dezembro"]
     mes_nome = meses[mes-1]
@@ -57,46 +116,20 @@ def obter_precos_web(ano, mes):
     print(f"❌ Não foi possível encontrar artigo para {mes_nome} {ano}")
     return None
 
-def extrair_precos_do_html(url):
-    print(f"📄 A extrair preços de {url}")
-    try:
-        resp = requests.get(url, timeout=20)
-        resp.raise_for_status()
-        texto = re.sub(r'\s+', ' ', resp.text)
-        precos = {}
-        padroes = {
-            "Gasolina": r"Gasolina passa a ser vendida a ([\d.,]+) ESC/L",
-            "Gasóleo Normal": r"Gasóleo Normal, a ([\d.,]+) ESC/L",
-            "Gasóleo Eletricidade": r"Gasóleo para Eletricidade, a ([\d.,]+) ESC/L",
-            "Gasóleo Marinha": r"Gasóleo Marinha, a ([\d.,]+) ESC/L",
-            "Petróleo": r"Petróleo, ([\d.,]+) ESC/L",
-            "Fuel 380": r"Fuel\s+380[^0-9]*([\d.,]+)\s*ESC/Kg",
-            "Fuel 180": r"Fuel\s+180[^0-9]*([\d.,]+)\s*ESC/Kg",
-            "Butano Granel": r"Gás Butano (?:passa a custar|mantem-se) a granel ([\d.,]+) ESC/Kg"
-        }
-        for prod, regex in padroes.items():
-            m = re.search(regex, texto, re.IGNORECASE)
-            if m:
-                precos[prod] = m.group(1).replace(',', '.')
-                print(f"   ✓ {prod}: {precos[prod]}")
-            else:
-                print(f"   ✗ {prod}: não encontrado")
-        if precos and len(precos) >= 5:
-            return precos
-    except Exception as e:
-        print(f"⚠️ Erro ao extrair HTML: {e}")
-    return None
-
 def obter_precos(ano, mes):
     precos = obter_precos_web(ano, mes)
     if precos:
         print(f"✅ Preços de {mes}/{ano} obtidos da web.")
         return precos
+    # Fallback para histórico (apenas para comparação, mas não deve ser usado para o mês actual)
     if ano in PRECOS_HISTORICOS and mes in PRECOS_HISTORICOS[ano]:
         print(f"📦 Usando dados históricos para {mes}/{ano} (apenas para comparação).")
         return PRECOS_HISTORICOS[ano][mes].copy()
     return None
 
+# ============================================================
+# Cálculo das variações
+# ============================================================
 def calcular_variacoes(atual, anterior):
     variacoes = {}
     for prod in atual:
@@ -116,6 +149,9 @@ def calcular_variacoes(atual, anterior):
             variacoes[prod] = {'perc': '—', 'diff': '—'}
     return variacoes
 
+# ============================================================
+# Geração do HTML do post (template completo)
+# ============================================================
 def gerar_html(atual, variacoes, mes, ano):
     meses = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
              "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
@@ -123,16 +159,30 @@ def gerar_html(atual, variacoes, mes, ano):
     data_vigor = f"1 a 31 de {mes_nome} {ano}"
     ordem = ["Gasolina", "Gasóleo Normal", "Petróleo", "Butano Granel",
              "Gasóleo Eletricidade", "Gasóleo Marinha", "Fuel 380", "Fuel 180"]
+    
     tabela = '<table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse;">\n'
-    tabela += '<thead><tr><th>Produto</th><th>Preço ECV</th><th>Variação (%)</th><th>Diferença (ECV)</th></tr></thead><tbody>\n'
+    tabela += '<thead>\n'
+    tabela += '<tr><th>Produto</th><th>Preço ECV</th><th>Variação (%)</th><th>Diferença (ECV)</th></tr>\n'
+    tabela += '</thead>\n<tbody>\n'
     for prod in ordem:
         if prod in atual:
             preco = atual[prod].replace('.', ',')
             var = variacoes.get(prod, {'perc': '—', 'diff': '—'})
-            tabela += f'<tr><td>{prod}</td><td>{preco}</td><td>{var["perc"]}</td><td>{var["diff"]}</td></tr>\n'
+            tabela += f'<tr>\n'
+            tabela += f'<td>{prod}</td>\n'
+            tabela += f'<td>{preco}</td>\n'
+            tabela += f'<td>{var["perc"]}</td>\n'
+            tabela += f'<td>{var["diff"]}</td>\n'
+            tabela += '</tr>\n'
         else:
-            tabela += f'<tr><td>{prod}</td><td>—</td><td>—</td><td>—</td></tr>\n'
-    tabela += '</tbody></table>\n'
+            tabela += '<tr>\n'
+            tabela += f'<td>{prod}</td>\n'
+            tabela += '<td>—</td>\n'
+            tabela += '<td>—</td>\n'
+            tabela += '<td>—</td>\n'
+            tabela += '</tr>\n'
+    tabela += '</tbody>\n</table>\n'
+    
     butano_granel = atual.get('Butano Granel', '0').replace('.', ',')
     garrafas = f"""
 <ul>
@@ -176,6 +226,9 @@ def publicar_rascunho(titulo, conteudo):
     }
     return client.call(NewPost(post))
 
+# ============================================================
+# Execução principal
+# ============================================================
 def main():
     hoje = datetime.now()
     ano, mes = hoje.year, hoje.month
