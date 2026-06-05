@@ -2,7 +2,7 @@ name: ARME - Preços combustíveis (mensal)
 
 on:
   schedule:
-    - cron: '0 6 1 * *'
+    - cron: '0 6 1 * *'          # 1º dia do mês às 6h (Cabo Verde)
       timezone: "Atlantic/Cape_Verde"
   workflow_dispatch:
 
@@ -14,7 +14,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - run: pip install requests python-wordpress-xmlrpc
+      - name: Instalar dependências
+        run: pip install requests python-wordpress-xmlrpc feedparser
       - name: Executar skill ARME
         env:
           WP_USERNAME: ${{ secrets.WP_USERNAME }}
