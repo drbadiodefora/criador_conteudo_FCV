@@ -1,53 +1,30 @@
-# arme_fuel_skill.py
+# arme_fuel_skill.py (versão robusta com fallback de ID)
 import os
 import re
 import requests
 import feedparser
-import unicodedata
 from datetime import datetime
 from wordpress_xmlrpc import Client, WordPressPost
 from wordpress_xmlrpc.methods.posts import NewPost
 
-# ============================================================
-# Credenciais – lidas do ambiente
-# ============================================================
 WP_USER = os.environ.get("WP_USERNAME", "")
 WP_PASS = os.environ.get("WP_PASSWORD", "")
 if not WP_USER or not WP_PASS:
     print("❌ Credenciais em falta.")
     exit(1)
 
-# ============================================================
 # Base histórica (apenas para comparação de variações)
-# ============================================================
 PRECOS_HISTORICOS = {
     2026: {
-        5: {
-            "Gasolina": "151.10",
-            "Gasóleo Normal": "126.90",
-            "Gasóleo Eletricidade": "96.90",
-            "Gasóleo Marinha": "90.60",
-            "Petróleo": "160.60",
-            "Fuel 380": "69.30",
-            "Fuel 180": "72.40",
-            "Butano Granel": "144.30"
-        },
-        4: {
-            "Gasolina": "139.89",
-            "Gasóleo Normal": "117.52",
-            "Gasóleo Eletricidade": "95.04",
-            "Gasóleo Marinha": "86.32",
-            "Petróleo": "148.66",
-            "Fuel 380": "67.92",
-            "Fuel 180": "70.99",
-            "Butano Granel": "144.30"
-        }
+        5: { "Gasolina": "151.10", "Gasóleo Normal": "126.90", "Gasóleo Eletricidade": "96.90",
+             "Gasóleo Marinha": "90.60", "Petróleo": "160.60", "Fuel 380": "69.30",
+             "Fuel 180": "72.40", "Butano Granel": "144.30" },
+        4: { "Gasolina": "139.89", "Gasóleo Normal": "117.52", "Gasóleo Eletricidade": "95.04",
+             "Gasóleo Marinha": "86.32", "Petróleo": "148.66", "Fuel 380": "67.92",
+             "Fuel 180": "70.99", "Butano Granel": "144.30" }
     }
 }
 
-# ============================================================
-# Extração dos preços a partir do HTML do artigo
-# ============================================================
 def extrair_precos_do_html(url):
     print(f"📄 A extrair preços de {url}")
     try:
@@ -78,19 +55,16 @@ def extrair_precos_do_html(url):
         print(f"⚠️ Erro ao extrair HTML: {e}")
     return None
 
-# ============================================================
-# Obter URL do artigo via feed RSS (mais fiável)
-# ============================================================
 def obter_precos_web(ano, mes):
     meses = ["janeiro","fevereiro","março","abril","maio","junho","julho","agosto","setembro","outubro","novembro","dezembro"]
     mes_nome = meses[mes-1]
     titulo_alvo = f"ARME atualiza preços máximos dos combustíveis para {mes_nome} {ano}"
     print(f"🔎 A procurar artigo: '{titulo_alvo}'")
 
-    # Estratégia 1: Feed RSS
+    # Estratégia 1: Feed RSS (pode falhar)
     feed_url = "https://www.arme.cv/feed"
     try:
-        feed = feedparser.parse(feed_url)
+        feed = feedparser.parse(feed_url, agent="Mozilla/5.0")
         print(f"📡 Feed RSS: {len(feed.entries)} entradas encontradas.")
         for entry in feed.entries:
             if titulo_alvo.lower() in entry.title.lower():
@@ -99,19 +73,54 @@ def obter_precos_web(ano, mes):
     except Exception as e:
         print(f"⚠️ Erro no feed RSS: {e}")
 
-    # Estratégia 2: Pesquisa no site (fallback)
-    search_url = f"https://www.arme.cv/index.php?option=com_search&view=search&searchword={titulo_alvo.replace(' ', '+')}"
+    # Estratégia 2: Pesquisa no site
+    search_url = f"https://www.arme.cv/index.php?option=com_search&view=search&searchword=preços+máximos"
     try:
         resp = requests.get(search_url, timeout=20)
         resp.raise_for_status()
         padrao = r'<a href="(index\.php\?option=com_content&amp;view=article&amp;id=\d+:[^"]+)".*?>(.*?)</a>'
+        # Guardar todos os artigos encontrados
+        candidatos = []
         for link, tit in re.findall(padrao, resp.text, re.IGNORECASE):
-            if titulo_alvo.lower() in tit.lower():
+            if "preços" in tit.lower() and mes_nome in tit.lower():
                 url_artigo = "https://www.arme.cv/" + link.replace('&amp;', '&')
-                print(f"✅ Artigo encontrado via pesquisa: {url_artigo}")
-                return extrair_precos_do_html(url_artigo)
+                candidatos.append((tit, url_artigo))
+        if candidatos:
+            # Pega o primeiro (mais recente)
+            tit, url = candidatos[0]
+            print(f"✅ Artigo encontrado via pesquisa: {url}")
+            return extrair_precos_do_html(url)
     except Exception as e:
         print(f"⚠️ Erro na pesquisa: {e}")
+
+    # Estratégia 3: Construir URL pelo ID (baseado no padrão observado)
+    # Para junho 2026, ID = 1360 (fornecido pelo usuário)
+    if ano == 2026:
+        if mes == 6:
+            # ID conhecido para junho 2026
+            url_construida = f"https://www.arme.cv/index.php?option=com_content&view=article&id=1360:arme-atualiza-precos-maximos-dos-combustiveis-para-junho-2026&catid=79&Itemid=878"
+            print(f"🔎 Tentando URL construída (ID=1360): {url_construida}")
+            try:
+                resp = requests.get(url_construida, timeout=20)
+                if resp.status_code == 200 and "preços" in resp.text.lower():
+                    print(f"✅ Artigo encontrado via URL construída!")
+                    return extrair_precos_do_html(url_construida)
+            except:
+                pass
+        else:
+            # Para meses futuros, tentar IDs a partir do último conhecido + 1
+            # Base: maio (1355) -> junho (1360) diferença 5
+            id_base = 1360
+            for tentativa in range(id_base, id_base + 10):
+                url_tentativa = f"https://www.arme.cv/index.php?option=com_content&view=article&id={tentativa}:arme-atualiza-precos-maximos-dos-combustiveis-para-{mes_nome}-{ano}&catid=79&Itemid=878"
+                print(f"🔎 Tentando ID {tentativa}...")
+                try:
+                    resp = requests.get(url_tentativa, timeout=10)
+                    if resp.status_code == 200 and mes_nome in resp.text.lower():
+                        print(f"✅ Artigo encontrado com ID {tentativa}")
+                        return extrair_precos_do_html(url_tentativa)
+                except:
+                    continue
 
     print(f"❌ Não foi possível encontrar artigo para {mes_nome} {ano}")
     return None
@@ -121,15 +130,11 @@ def obter_precos(ano, mes):
     if precos:
         print(f"✅ Preços de {mes}/{ano} obtidos da web.")
         return precos
-    # Fallback para histórico (apenas para comparação, mas não deve ser usado para o mês actual)
     if ano in PRECOS_HISTORICOS and mes in PRECOS_HISTORICOS[ano]:
         print(f"📦 Usando dados históricos para {mes}/{ano} (apenas para comparação).")
         return PRECOS_HISTORICOS[ano][mes].copy()
     return None
 
-# ============================================================
-# Cálculo das variações
-# ============================================================
 def calcular_variacoes(atual, anterior):
     variacoes = {}
     for prod in atual:
@@ -149,9 +154,6 @@ def calcular_variacoes(atual, anterior):
             variacoes[prod] = {'perc': '—', 'diff': '—'}
     return variacoes
 
-# ============================================================
-# Geração do HTML do post (template completo)
-# ============================================================
 def gerar_html(atual, variacoes, mes, ano):
     meses = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
              "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
@@ -159,11 +161,8 @@ def gerar_html(atual, variacoes, mes, ano):
     data_vigor = f"1 a 31 de {mes_nome} {ano}"
     ordem = ["Gasolina", "Gasóleo Normal", "Petróleo", "Butano Granel",
              "Gasóleo Eletricidade", "Gasóleo Marinha", "Fuel 380", "Fuel 180"]
-    
     tabela = '<table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse;">\n'
-    tabela += '<thead>\n'
-    tabela += '<tr><th>Produto</th><th>Preço ECV</th><th>Variação (%)</th><th>Diferença (ECV)</th></tr>\n'
-    tabela += '</thead>\n<tbody>\n'
+    tabela += '<thead><tr><th>Produto</th><th>Preço ECV</th><th>Variação (%)</th><th>Diferença (ECV)</th></tr></thead><tbody>\n'
     for prod in ordem:
         if prod in atual:
             preco = atual[prod].replace('.', ',')
@@ -181,8 +180,7 @@ def gerar_html(atual, variacoes, mes, ano):
             tabela += '<td>—</td>\n'
             tabela += '<td>—</td>\n'
             tabela += '</tr>\n'
-    tabela += '</tbody>\n</table>\n'
-    
+    tabela += '</tbody></table>\n'
     butano_granel = atual.get('Butano Granel', '0').replace('.', ',')
     garrafas = f"""
 <ul>
@@ -226,9 +224,6 @@ def publicar_rascunho(titulo, conteudo):
     }
     return client.call(NewPost(post))
 
-# ============================================================
-# Execução principal
-# ============================================================
 def main():
     hoje = datetime.now()
     ano, mes = hoje.year, hoje.month
