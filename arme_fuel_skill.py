@@ -263,7 +263,7 @@ def publicar_rascunho(titulo, conteudo):
     post = WordPressPost()
     post.title = titulo
     post.content = conteudo
-    post.post_status = 'publish'
+    post.post_status = 'draft'
     post.terms_names = {
         'category': ['NOTÍCIAS & ATUALIZAÇÕES'],
         'post_tag': ['combustíveis', 'ARME']
