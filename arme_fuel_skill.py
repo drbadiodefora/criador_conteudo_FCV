@@ -1,5 +1,5 @@
-# arme_fuel_skill.py (versão melhorada com diagnóstico e fallback de URL)
-import os, re, requests, unicodedata
+# arme_fuel_skill.py (versão com RSS, robusta)
+import os, re, requests, feedparser, unicodedata
 from datetime import datetime
 from wordpress_xmlrpc import Client, WordPressPost
 from wordpress_xmlrpc.methods.posts import NewPost
@@ -10,7 +10,7 @@ if not WP_USER or not WP_PASS:
     print("❌ Credenciais em falta.")
     exit(1)
 
-# Base histórica (apenas para comparação, não para inserção manual)
+# Base histórica para comparação (apenas para cálculo de variações)
 PRECOS_HISTORICOS = {
     2026: {
         5: { "Gasolina": "151.10", "Gasóleo Normal": "126.90", "Gasóleo Eletricidade": "96.90",
@@ -22,53 +22,37 @@ PRECOS_HISTORICOS = {
     }
 }
 
-def slugify(text):
-    """Remove acentos e converte para minúsculas, para comparação de títulos."""
-    text = unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('utf-8')
-    return text.lower().replace(' ', '-')
-
 def obter_precos_web(ano, mes):
     meses = ["janeiro","fevereiro","março","abril","maio","junho","julho","agosto","setembro","outubro","novembro","dezembro"]
     mes_nome = meses[mes-1]
-    titulo_esperado = f"ARME atualiza preços máximos dos combustíveis para {mes_nome} {ano}"
-    print(f"🔎 A procurar artigo: '{titulo_esperado}'")
+    titulo_alvo = f"ARME atualiza preços máximos dos combustíveis para {mes_nome} {ano}"
+    print(f"🔎 A procurar artigo: '{titulo_alvo}'")
 
-    # Estratégia 1: pesquisa no site
-    url_cat = "https://www.arme.cv/index.php?option=com_content&view=category&id=79&Itemid=878"
+    # Estratégia 1: Feed RSS
+    feed_url = "https://www.arme.cv/feed"
     try:
-        resp = requests.get(url_cat, timeout=20)
+        feed = feedparser.parse(feed_url)
+        print(f"📡 Feed RSS: {len(feed.entries)} entradas encontradas.")
+        for entry in feed.entries:
+            if titulo_alvo.lower() in entry.title.lower():
+                print(f"✅ Artigo encontrado via RSS: {entry.link}")
+                return extrair_precos_do_html(entry.link)
+    except Exception as e:
+        print(f"⚠️ Erro no feed RSS: {e}")
+
+    # Estratégia 2: Pesquisa no site (fallback)
+    search_url = f"https://www.arme.cv/index.php?option=com_search&view=search&searchword={titulo_alvo.replace(' ', '+')}"
+    try:
+        resp = requests.get(search_url, timeout=20)
         resp.raise_for_status()
-        # Procura por qualquer link cujo título contenha a string (case insensitive)
         padrao = r'<a href="(index\.php\?option=com_content&amp;view=article&amp;id=\d+:[^"]+)".*?>(.*?)</a>'
         for link, tit in re.findall(padrao, resp.text, re.IGNORECASE):
-            if titulo_esperado.lower() in tit.lower():
+            if titulo_alvo.lower() in tit.lower():
                 url_artigo = "https://www.arme.cv/" + link.replace('&amp;', '&')
                 print(f"✅ Artigo encontrado via pesquisa: {url_artigo}")
                 return extrair_precos_do_html(url_artigo)
     except Exception as e:
         print(f"⚠️ Erro na pesquisa: {e}")
-
-    # Estratégia 2: construir URL esperado com base no slug
-    # Exemplo: .../id=1355:arme-atualiza-precos-maximos-dos-combustiveis-para-junho-2026
-    slug = slugify(titulo_esperado)
-    url_guess = f"https://www.arme.cv/index.php?option=com_content&view=article&id=0:{slug}&catid=79&Itemid=878"
-    # Como não sabemos o ID, tentamos procurar na página de categoria novamente, mas desta vez usamos uma busca mais flexível
-    # Ou podemos tentar listar todos os artigos da categoria e pegar o mais recente com o mês correcto
-    print(f"🔎 Tentando localizar artigo para {mes_nome} {ano} por data...")
-    try:
-        resp = requests.get(url_cat, timeout=20)
-        resp.raise_for_status()
-        # Extrai todos os links e títulos
-        padrao = r'<a href="(index\.php\?option=com_content&amp;view=article&amp;id=\d+:[^"]+)".*?>(.*?)</a>'
-        matches = re.findall(padrao, resp.text, re.IGNORECASE)
-        # Ordena por data? Não temos, mas podemos verificar se o título contém o mês
-        for link, tit in matches:
-            if mes_nome in tit.lower():
-                url_artigo = "https://www.arme.cv/" + link.replace('&amp;', '&')
-                print(f"✅ Artigo encontrado por data: {url_artigo}")
-                return extrair_precos_do_html(url_artigo)
-    except Exception as e:
-        print(f"⚠️ Erro na busca por data: {e}")
 
     print(f"❌ Não foi possível encontrar artigo para {mes_nome} {ano}")
     return None
@@ -104,15 +88,12 @@ def extrair_precos_do_html(url):
     return None
 
 def obter_precos(ano, mes):
-    # Primeiro tenta web
     precos = obter_precos_web(ano, mes)
     if precos:
         print(f"✅ Preços de {mes}/{ano} obtidos da web.")
         return precos
-    # Fallback para histórico (mas apenas para comparação de variações, não para o post)
-    # Se não houver histórico, aborta – pois não podemos publicar dados errados.
     if ano in PRECOS_HISTORICOS and mes in PRECOS_HISTORICOS[ano]:
-        print(f"📦 Usando dados históricos para {mes}/{ano} (apenas para comparar com mês anterior).")
+        print(f"📦 Usando dados históricos para {mes}/{ano} (apenas para comparação).")
         return PRECOS_HISTORICOS[ano][mes].copy()
     return None
 
@@ -143,26 +124,15 @@ def gerar_html(atual, variacoes, mes, ano):
     ordem = ["Gasolina", "Gasóleo Normal", "Petróleo", "Butano Granel",
              "Gasóleo Eletricidade", "Gasóleo Marinha", "Fuel 380", "Fuel 180"]
     tabela = '<table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse;">\n'
-    tabela += '<thead>\n'
-    tabela += '<tr><th>Produto</th><th>Preço ECV</th><th>Variação (%)</th><th>Diferença (ECV)</th></tr>\n</thead>\n<tbody>\n'
+    tabela += '<thead><tr><th>Produto</th><th>Preço ECV</th><th>Variação (%)</th><th>Diferença (ECV)</th></tr></thead><tbody>\n'
     for prod in ordem:
         if prod in atual:
             preco = atual[prod].replace('.', ',')
             var = variacoes.get(prod, {'perc': '—', 'diff': '—'})
-            tabela += f'<tr>\n'
-            tabela += f'<td>{prod}</td>\n'
-            tabela += f'<td>{preco}</td>\n'
-            tabela += f'<td>{var["perc"]}</td>\n'
-            tabela += f'<td>{var["diff"]}</td>\n'
-            tabela += '</tr>\n'
+            tabela += f'<tr><td>{prod}</td><td>{preco}</td><td>{var["perc"]}</td><td>{var["diff"]}</td></tr>\n'
         else:
-            tabela += '<tr>\n'
-            tabela += f'<td>{prod}</td>\n'
-            tabela += '<td>—</td>\n'
-            tabela += '<td>—</td>\n'
-            tabela += '<td>—</td>\n'
-            tabela += '</tr>\n'
-    tabela += '</tbody>\n</table>\n'
+            tabela += f'<tr><td>{prod}</td><td>—</td><td>—</td><td>—</td></tr>\n'
+    tabela += '</tbody></table>\n'
     butano_granel = atual.get('Butano Granel', '0').replace('.', ',')
     garrafas = f"""
 <ul>
